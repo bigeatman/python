@@ -1,11 +1,13 @@
+from flask import Flask, request, render_template_string
 import pandas as pd
 import numpy as np
 import os
 from sklearn.preprocessing import OneHotEncoder
 import lightgbm as lgb
 
-CSV_FILE = "player_training_data.csv"
+app = Flask(__name__)
 
+CSV_FILE = "player_training_data.csv"
 ATTRIBUTES = ["speed", "stamina", "power", "guts", "intelligence", "condition"]
 PLAYERS_NUM = 6
 
@@ -17,8 +19,6 @@ def load_training_data():
     return df
 
 def prepare_training_data(df, encoder=None):
-    # 선수별 데이터가 한 행으로 되어 있으므로 그대로 사용 가능
-    # style 컬럼 원핫 인코딩 처리
     X = df[ATTRIBUTES + ["style"]]
     y = PLAYERS_NUM + 1 - df["rank"].values
     groups = df.groupby("match_id").size().to_list()
@@ -62,7 +62,7 @@ def prepare_input_features(players, encoder):
 def predict_ranking(model, players, encoder):
     X_input = prepare_input_features(players, encoder)
     preds = model.predict(X_input)
-    order = np.argsort(-preds)  # 작은 점수가 높은 순위일 수 있으므로 결과 확인 필요
+    order = np.argsort(-preds)
     ranks = [0] * PLAYERS_NUM
     for rank, idx in enumerate(order, 1):
         ranks[idx] = rank
@@ -93,33 +93,68 @@ def append_new_match(players, ranks):
     df_new = df_new[cols_order]
 
     df_new.to_csv(CSV_FILE, mode='a', index=False, header=not os.path.exists(CSV_FILE))
-    print(f"새 경기 데이터(match_id={next_match_id})가 {CSV_FILE}에 추가되었습니다.")
 
-if __name__ == "__main__":
-    print("6명의 선수 능력치와 스타일을 입력하세요.")
-    print("예) 3 2 6 1 4 2 훼방꾼")
 
+HTML_FORM = """
+<!doctype html>
+<title>Player Ranking Predictor</title>
+<h2>6명의 선수 능력치와 스타일을 입력하세요.</h2>
+<p>예) 3 2 6 1 4 2 훼방꾼</p>
+
+<form method="post" action="/predict">
+  {% for i in range(1,7) %}
+    <label>{{i}}번 선수:</label><br>
+    <input type="text" name="player{{i}}" required><br><br>
+  {% endfor %}
+  <input type="submit" value="순위 예측">
+</form>
+
+{% if predicted_ranks %}
+  <h3>[예측 순위 결과]</h3>
+  <ul>
+  {% for i, rank in enumerate(predicted_ranks, 1) %}
+    <li>{{i}}번 선수 → 예측 순위: {{rank}}</li>
+  {% endfor %}
+  </ul>
+
+  <h3>실제 순위를 입력하세요. (예: 6 1 4 3 2 5)</h3>
+  <form method="post" action="/submit_ranks">
+    <input type="hidden" name="players_data" value="{{ players_data }}">
+    <input type="text" name="actual_ranks" required>
+    <input type="submit" value="저장">
+  </form>
+{% endif %}
+
+{% if message %}
+  <p>{{message}}</p>
+{% endif %}
+"""
+
+from urllib.parse import quote, unquote
+import json
+
+@app.route("/", methods=["GET"])
+def index():
+    return render_template_string(HTML_FORM)
+
+@app.route("/predict", methods=["POST"])
+def predict():
     players = []
-    for i in range(PLAYERS_NUM):
-        while True:
-            raw = input(f"{i + 1}번 선수: ").strip()
-            parts = raw.split()
-            if len(parts) != 7:
-                print("잘못된 입력입니다. 6개의 숫자와 1개의 스타일명을 입력하세요.")
-                continue
-            try:
-                stats = list(map(int, parts[:6]))
-            except:
-                print("능력치는 정수여야 합니다.")
-                continue
-            style = parts[6]
-            players.append(stats + [style])
-            break
+    for i in range(1, PLAYERS_NUM + 1):
+        raw = request.form.get(f"player{i}", "").strip()
+        parts = raw.split()
+        if len(parts) != 7:
+            return render_template_string(HTML_FORM, message=f"{i}번 선수 입력 오류: 6개의 숫자와 1개의 스타일명을 입력하세요.")
+        try:
+            stats = list(map(int, parts[:6]))
+        except:
+            return render_template_string(HTML_FORM, message=f"{i}번 선수 능력치는 정수여야 합니다.")
+        style = parts[6]
+        players.append(stats + [style])
 
     df = load_training_data()
 
     if df.empty:
-        print("학습 데이터가 없습니다. 예측을 할 수 없습니다.")
         predicted_ranks = list(range(1, PLAYERS_NUM + 1))
         encoder = OneHotEncoder(sparse=False, handle_unknown="ignore")
         encoder.fit(np.array([[p[6]] for p in players]))
@@ -128,27 +163,40 @@ if __name__ == "__main__":
         model = train_lgb_ranker(X, y, groups)
         predicted_ranks = predict_ranking(model, players, encoder)
 
-    print("\n[예측 순위 결과]")
-    for i, rank in enumerate(predicted_ranks, 1):
-        print(f"{i}번 선수 → 예측 순위: {rank}")
+    # players 정보를 JSON 직렬화 후 URL 안전하게 인코딩해서 hidden input에 넘김
+    players_data = quote(json.dumps(players))
 
-    print("\n실제 순위를 입력하세요. (예: 6 1 4 3 2 5)")
-    print("입력한 등수는 선수번호 순서가 아닌, 등수 순서대로 선수번호를 의미합니다.")
-    while True:
-        try:
-            input_ranks = list(map(int, input("> ").strip().split()))
-            if len(input_ranks) != PLAYERS_NUM:
-                print(f"{PLAYERS_NUM}개의 선수번호를 입력하세요.")
-                continue
-            if sorted(input_ranks) != list(range(1, PLAYERS_NUM + 1)):
-                print(f"1부터 {PLAYERS_NUM}까지 선수번호를 모두 포함해야 합니다.")
-                continue
-            break
-        except:
-            print("잘못된 입력입니다. 다시 입력하세요.")
+    return render_template_string(HTML_FORM, predicted_ranks=predicted_ranks, players_data=players_data)
+
+@app.route("/submit_ranks", methods=["POST"])
+def submit_ranks():
+    players_data = request.form.get("players_data", "")
+    actual_ranks_raw = request.form.get("actual_ranks", "").strip()
+
+    if not players_data or not actual_ranks_raw:
+        return render_template_string(HTML_FORM, message="선수 정보나 실제 순위가 누락되었습니다.")
+
+    players_json = json.loads(unquote(players_data))
+    input_ranks = actual_ranks_raw.split()
+
+    if len(input_ranks) != PLAYERS_NUM:
+        return render_template_string(HTML_FORM, message=f"{PLAYERS_NUM}개의 선수번호를 입력하세요.")
+
+    try:
+        input_ranks = list(map(int, input_ranks))
+    except:
+        return render_template_string(HTML_FORM, message="잘못된 입력입니다. 선수번호는 정수여야 합니다.")
+
+    if sorted(input_ranks) != list(range(1, PLAYERS_NUM + 1)):
+        return render_template_string(HTML_FORM, message=f"1부터 {PLAYERS_NUM}까지 선수번호를 모두 포함해야 합니다.")
 
     ranks = [0] * PLAYERS_NUM
     for rank_pos, player_num in enumerate(input_ranks, start=1):
         ranks[player_num - 1] = rank_pos
 
-    append_new_match(players, ranks)
+    append_new_match(players_json, ranks)
+
+    return render_template_string(HTML_FORM, message="새 경기 데이터가 저장되었습니다. 다시 입력해주세요.")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)

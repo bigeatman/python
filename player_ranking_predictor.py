@@ -199,4 +199,5 @@ def submit_ranks():
     return render_template_string(HTML_FORM, message="새 경기 데이터가 저장되었습니다. 다시 입력해주세요.")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
